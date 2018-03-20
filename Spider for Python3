@@ -1,0 +1,144 @@
+#-*- coding: UTF-8 -*-
+
+import sys
+import time
+import urllib
+import requests
+import numpy as np
+from bs4 import BeautifulSoup
+from openpyxl import Workbook
+
+import importlib
+importlib.reload(sys)
+
+
+
+#Some User Agents
+hds=[{'User-Agent':'Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US; rv:1.9.1.6) Gecko/20091201 Firefox/3.5.6'},\
+{'User-Agent':'Mozilla/5.0 (Windows NT 6.2) AppleWebKit/535.11 (KHTML, like Gecko) Chrome/17.0.963.12 Safari/535.11'},\
+{'User-Agent': 'Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.2; Trident/6.0)'}]
+
+
+def book_spider(book_tag):
+    page_num=0;
+    book_list=[]
+    try_times=0
+    
+    while(1):
+        #url='http://www.douban.com/tag/%E5%B0%8F%E8%AF%B4/book?start=0' # For Test
+        url='http://www.douban.com/tag/'+urllib.parse.quote(book_tag)+'/book?start='+str(page_num*15)   #需要爬的地址，每页15本书
+        time.sleep(np.random.rand()*5)
+        
+        #Last Version
+        try:
+            req = urllib.request.Request(url, headers=hds[page_num%len(hds)])       #请求链接，这里headers?
+            source_code = urllib.request.urlopen(req).read().decode("utf-8")        #打开链接，并且读取原码，并利用decode("utf-8"）对源码进行解码，否则信息为乱码)
+            plain_text=str(source_code)                                             #将source_code强制为str格式
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            print (e)
+            continue
+  
+        ##Previous Version, IP is easy to be Forbidden
+        #source_code = requests.get(url) 
+        #plain_text = source_code.text  
+        
+        soup = BeautifulSoup(plain_text)                                            #利用美味汤将源码的文本文件做实体切割，将html解析为对象进行处理，全部页面转变为字典或者数组，相对于正则表达式的方式，可以大大简化处理过程。
+        list_soup = soup.find('div', {'class': 'mod book-list'})                    #找到分类为'class mod book-list'的实体
+        
+        try_times+=1;
+        if list_soup==None and try_times<200:                                       #一个种类不超过200次尝试
+            continue
+        elif list_soup==None or len(list_soup)<=1:                                  #豆瓣分类图书只有在前20页有内容，超过20页，len(list_soup)<=1
+            break # Break when no informatoin got after 200 times requesting
+        
+        for book_info in list_soup.findAll('dd'):                                   #在所有dd的实体种类中，进行信息提取，每个dd为对应每本书
+            title = book_info.find('a', {'class':'title'}).string.strip()           #提取书名
+            desc = book_info.find('div', {'class':'desc'}).string.strip()           #提取出版信息
+            desc_list = desc.split('/')                                             #将用/分割的信息存为list中的不同元素
+            book_url = book_info.find('a', {'class':'title'}).get('href')           #提取图书链接信息
+            
+            try:
+                author_info = '作者/译者： ' + '/'.join(desc_list[0:-3])             #最后三个元素为出版信息，提取前面的信息进行整合
+            except:
+                author_info ='作者/译者： 暂无'
+            try:
+                pub_info = '出版信息： ' + '/'.join(desc_list[-3:])                  #最后三个元素为出版信息
+            except:
+                pub_info = '出版信息： 暂无'
+            try:
+                rating = book_info.find('span', {'class':'rating_nums'}).string.strip() #提取该书评分
+            except:
+                rating='0.0'
+            try:
+                #people_num = book_info.findAll('span')[2].string.strip()
+                people_num = get_people_num(book_url)                                   #提取评价人数
+                people_num = people_num.strip('人评价')
+            except:
+                people_num ='0'
+            
+            book_list.append([title,rating,people_num,author_info,pub_info])            #在book_list中将这本书的信息加在队尾
+            try_times=0 #set 0 when got valid information 实际尝试成功就将尝试次数清零
+        page_num+=1                                                                     #下一页    
+        print ('Downloading Information From Page %d' % page_num)                       #显示正在下载第1页信息
+    return book_list  #爬完该类别所有能爬的页面，范围该类别所有书单
+
+
+def get_people_num(url):
+    #url='http://book.douban.com/subject/6082808/?from=tag_all' # For Test
+    try:
+        req = urllib.request.Request(url, headers=hds[np.random.randint(0,len(hds))])#这里有个rating_sum
+        source_code = urllib.urlopen(req).read()
+        plain_text=str(source_code)   
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        print (e)
+    soup = BeautifulSoup(plain_text)
+    people_num=soup.find('div',{'class':'rating_sum'}).findAll('span')[1].string.strip()
+    return people_num
+
+
+def do_spider(book_tag_lists):
+    book_lists=[]
+    for book_tag in book_tag_lists:                 #在想要爬的类别中循环
+        book_list=book_spider(book_tag)             #返回一个类别中的所有书单
+        book_list=sorted(book_list,key=lambda x:x[1],reverse=True)                  #对该类别所有图书按照x[1]进行降序排序，即打分由高到低
+        book_lists.append(book_list)                #在上一个类别书单后，加入当前类别的整个书单
+    return book_lists    #返回所有想要爬的类别的书单
+
+
+def print_book_lists_excel(book_lists,book_tag_lists):                      #把书单输出到excel中
+    wb=Workbook(write_only=True)                                           #创建一个类为workbook的wb
+    ws=[]
+    for i in range(len(book_tag_lists)):
+        ws.append(wb.create_sheet(title=book_tag_lists[i])) #utf8->unicode  #创建所有想爬的类别为sheet
+    for i in range(len(book_tag_lists)): 
+        ws[i].append(['序号','书名','评分','评价人数','作者','出版社'])        #在第一行加入项目标签
+        count=1
+        for bl in book_lists[i]:
+#            a=eval("'{}'".format(bl[0])).encode('latin-1').decode()
+            ws[i].append([count,bl[0],float(bl[1]),int(bl[2]),bl[3],bl[4]]) #在各列分别写编号，书名，评分，评价人数，作者，出版信息
+            
+#            ws[i].append([count,str(a),float(bl[1]),int(bl[2]),bl[3],bl[4]])
+            count+=1                                                        #下一本书
+    save_path='book_list'                                                   #存储路径，当前文件夹：book_list-类别1-类别2.xlsx
+    for i in range(len(book_tag_lists)):
+        save_path+=('-'+book_tag_lists[i])
+    save_path+='.xlsx'
+    wb.save(save_path)                                                      #存储wb
+
+
+
+
+if __name__=='__main__':
+    #book_tag_lists = ['心理','判断与决策','算法','数据结构','经济','历史']
+    #book_tag_lists = ['传记','哲学','编程','创业','理财','社会学','佛教']
+    #book_tag_lists = ['思想','科技','科学','web','股票','爱情','两性']
+    #book_tag_lists = ['计算机','机器学习','linux','android','数据库','互联网']
+    #book_tag_lists = ['数学']
+    #book_tag_lists = ['摄影','设计','音乐','旅行','教育','成长','情感','育儿','健康','养生']
+    #book_tag_lists = ['商业','理财','管理']  
+    #book_tag_lists = ['名著']
+    #book_tag_lists = ['科普','经典','生活','心灵','文学']
+    #book_tag_lists = ['科幻','思维','金融']
+    book_tag_lists = ['个人管理','时间管理','投资','文化','宗教']
+    book_lists=do_spider(book_tag_lists)
+    print_book_lists_excel(book_lists,book_tag_lists)
